@@ -1,3 +1,4 @@
+import sys
 from syft.workers.websocket_server import WebsocketServerWorker
 import torch
 import syft as sy
@@ -7,8 +8,14 @@ from multiprocessing import Process
 from torchvision import datasets, transforms
 from split_dataset import split_dataset_indices
 
-N_SERVER = 10
-STDEV = 0
+# Argument parsing
+try:
+    N_SERVER = int(sys.argv[1])
+    STDEV = int(sys.argv[2])
+    print(f"Will start {N_SERVER} servers (data owners) with stdev of {STDEV}")
+except Exception as e:
+    print(e)
+    sys.exit()
 
 def run_data_server(id, indices):
     hook = sy.TorchHook(torch)
