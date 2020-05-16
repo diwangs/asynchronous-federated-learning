@@ -1,7 +1,21 @@
 #!/bin/sh
-# ./train.sh {centralized/distributed} {mnist/cifar} <n_servers> <stdev> <staleness>
-python src/servers.py 2 0 &
-sudo tc qdisc add dev lo root handle 1:0 netem delay 2ms loss random 10%
-while [ -z "$(pgrep -P $!)" ]; do sleep 1; done # Wait till the servers fork
-trap "kill $(echo $(pgrep -P $!) | tr '\n' ' ') $!; sudo tc qdisc del dev lo root" INT EXIT
-python src/client.py 2
+
+N_SERVER=2
+STDEV=0
+LOSS=10%
+STALENESS_THRESHOLD=0
+
+cleanup()
+{
+    echo "Restoring network..."
+    sudo tc qdisc del dev lo root
+    echo "Gracefully (not really) shutting servers down..."
+    kill -9 $(echo $(pgrep -P $SERVERS_PID) | tr '\n' ' ')$SERVERS_PID
+}
+trap cleanup SIGINT SIGTERM
+
+python src/servers.py $N_SERVER $STDEV &
+SERVERS_PID=$!
+echo "Modifying network..."
+sudo tc qdisc add dev lo root handle 1:0 netem loss random $LOSS
+python src/client.py $N_SERVER $STALENESS_THRESHOLD

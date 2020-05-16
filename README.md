@@ -44,3 +44,6 @@ Hypothesis:
 * Applying high asynchronicity in a certain wild env can result in model being inaccurate: slow but knowledgable server will lose the gradient "tug-of-war"
 * Applying low asynchronicity in some other wild env can result in slowness: slow and low-information server can be left behind
 * In a tame environment, there's a performance plateau anyway due to amdahl's law? just like regular distributed learning
+
+# BUG!
+* async_fit + lossy network is not good, because the synchronous handle can get onesided disconnected

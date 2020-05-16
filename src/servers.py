@@ -1,12 +1,14 @@
 import sys
 from syft.workers.websocket_server import WebsocketServerWorker
-import torch
 import syft as sy
 from collections import Counter
 from multiprocessing import Process
+from time import sleep
 
 from torchvision import datasets, transforms
 from split_dataset import split_dataset_indices
+
+from custom_server import CustomWebsocketServerWorker
 
 # Argument parsing
 try:
@@ -18,38 +20,44 @@ except Exception as e:
     sys.exit()
 
 def run_data_server(id, indices):
-    hook = sy.TorchHook(torch)
-    server = WebsocketServerWorker(
-        id=f"dataserver-{id}",
-        host="0.0.0.0",
-        port=f"{8777 + id}",
-        hook=hook
-    )
+    import torch # Each process should import torch to allow parallelization?
 
-    mnist = datasets.MNIST(
-        root="./data",
-        train=True,
-        download=True,
-        transform=transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-        ),
-    )
+    try:
+        hook = sy.TorchHook(torch)
+        server = CustomWebsocketServerWorker(
+            id=f"dataserver-{id}",
+            host="0.0.0.0",
+            port=f"{8777 + id}",
+            hook=hook
+        )
 
-    is_kept_mask = torch.tensor([x in indices for x in range(len(mnist.targets))])
+        mnist = datasets.MNIST(
+            root="./data",
+            train=True,
+            download=True,
+            transform=transforms.Compose(
+                [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+            ),
+        )
 
-    dataset = sy.BaseDataset(
-        data=torch.masked_select(mnist.data.transpose(0, 2), is_kept_mask)
-            .view(28, 28, -1)
-            .transpose(2, 0),
-        targets=torch.masked_select(mnist.targets, is_kept_mask),
-        transform=mnist.transform
-    )
+        is_kept_mask = torch.tensor([x in indices for x in range(len(mnist.targets))])
 
-    server.add_dataset(dataset, key="mnist")
-    print(f"Server {id} started")
-    server.start()
+        dataset = sy.BaseDataset(
+            data=torch.masked_select(mnist.data.transpose(0, 2), is_kept_mask)
+                .view(28, 28, -1)
+                .transpose(2, 0),
+            targets=torch.masked_select(mnist.targets, is_kept_mask),
+            transform=mnist.transform
+        )
+
+        server.add_dataset(dataset, key="mnist")
+        print(f"Server {id} started")
+        server.start()
+    except (KeyboardInterrupt, SystemExit):
+        print(f"Server {id} stoped")
 
 if __name__ == "__main__":
+    processes = []
     print("Splitting dataset...")
     targets = datasets.MNIST(
         root="./data",
@@ -64,7 +72,6 @@ if __name__ == "__main__":
     indices_per_server = split_dataset_indices(indices_per_class, N_SERVER, STDEV)
 
     print("Starting servers...")
-    processes = []
     for i in range(N_SERVER):
         processes.append(Process(target=run_data_server, args=(i, indices_per_server[i])))
     for process in processes:

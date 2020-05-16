@@ -1,49 +1,52 @@
 import torch
+from datetime import datetime
 from torch import nn
 from torch import optim
 import torch.nn.functional as F
 from torchvision import datasets, transforms
+from sklearn.metrics import f1_score
+from base_model import Net
+from tqdm import tqdm
+import matplotlib.pyplot as plt
 
-mnist = datasets.MNIST(
+mnist = torch.utils.data.DataLoader(datasets.MNIST(
     root="./data",
     train=True,
     download=True,
     transform=transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
     ),
+), batch_size=10)
+
+mnist_test = datasets.MNIST(
+    root="./data",
+    train=False,
+    download=True,
+    transform=transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+    ),
 )
 
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(1, 20, 5)
-        self.conv2 = nn.Conv2d(20, 50, 5)
-        self.fc1 = nn.Linear(4 * 4 * 50, 500)
-        self.fc2 = nn.Linear(500, 10)
-
-    def forward(self, x):
-        x = F.relu(self.conv1(x.float()))
-        x = F.max_pool2d(x, 2, 2)
-        x = F.relu(self.conv2(x))
-        x = F.max_pool2d(x, 2, 2)
-        x = x.view(-1, 4 * 4 * 50)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return F.log_softmax(x, dim=1)
-
 model = Net()
-opt = optim.SGD(params=model.parameters(),lr=0.1)
+opt = optim.SGD(params=model.parameters(), lr=0.1)
 
-for iter in range(20):
-    for data, target in mnist:
+start_time = datetime.now()
+for i in range(1000):
+    model.train()
+    j = 0
+    for data, target in tqdm(mnist):
         # 1) erase previous gradients (if they exist)
         opt.zero_grad()
 
         # 2) make a prediction
-        pred = model(data.view(1, 1, 28, 28))
+        pred = model(data)
+        # plt.imshow(data.view(1, 1, 28, 28)[0][0])
+        # plt.show()
 
         # 3) calculate how much we missed
-        loss = F.nll_loss(input=pred, target=torch.tensor([target]))
+        loss = F.nll_loss(input=pred, target=target)
+
+        # print(target, pred.data, loss.item())
 
         # 4) figure out which weights caused us to miss
         loss.backward()
@@ -52,4 +55,13 @@ for iter in range(20):
         opt.step()
 
         # 6) print our progress
-        print(loss.data)
+        # print(loss.data)
+    
+        if j % 20 == 0:
+            model.eval()
+            y_pred = [model(datum.view(1, 1, 28, 28)).detach().numpy().argmax() for datum, _ in mnist_test] # Slow...
+            f1 = f1_score(mnist_test.targets, y_pred, average='micro')
+            print(f"micro-f1 score at {datetime.now() - start_time} is {f1}")
+        j += 1
+    
+
