@@ -9,8 +9,8 @@ cleanup()
 {
     echo "Restoring network..."
     sudo tc qdisc del dev lo root
-    echo "Gracefully (not really) shutting servers down..."
-    kill -9 $(echo $(pgrep -P $SERVERS_PID) | tr '\n' ' ')$SERVERS_PID
+    echo "Gracefully shutting servers down..."
+    kill $SERVERS_PID
 }
 trap cleanup SIGINT SIGTERM
 

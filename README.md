@@ -1,8 +1,7 @@
 TODO:
 * Parameterize data server with real data
-* Create script to split data into n bin with incomplete classes
-* Learn netem: simulate network loss and delay 
-sudo tc qdisc del dev lo root
+* Sanitize logs
+* Profiling
 
 # Distributed Model Consistency Spectrum
 * Synchronous

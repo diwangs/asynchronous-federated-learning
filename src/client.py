@@ -2,7 +2,7 @@ import sys
 import time
 import asyncio
 from threading import Thread, Lock
-from multiprocessing import Process
+from multiprocessing import Process, Pool
 from copy import deepcopy
 from datetime import datetime
 import logging
@@ -36,8 +36,9 @@ eval_dataset = datasets.MNIST(
 )
 eval_dataset_loader = torch.utils.data.DataLoader(eval_dataset, batch_size=100, shuffle=False)
 
-def main(n_server, staleness_threshold):
-    threads = []
+def main(n_server, staleness_threshold, eval_interval=10, eval_pool_size=1, training_duration=300):
+    client_threads = []
+    eval_results = {}
     stop_flag = False
     try:
         hook = sy.TorchHook(torch)
@@ -49,48 +50,55 @@ def main(n_server, staleness_threshold):
             while True:
                 try:
                     servers.append(WebsocketClientWorker(id=f"dataserver-{i}", port=8777+i, **kwargs_websocket))
-                    # TODO: reconnect
                     break
                 except ConnectionRefusedError:
                     continue
 
-        logger.info("Training starts!")
-        threads = [Thread(target=train_loop, args=(server, staleness_threshold, lambda: stop_flag)) for server in servers]
-        # threads.append(Thread(target=evaluator_thread, args=(lambda: stop_flag, )))
-        for thread in threads:
+        logger.debug("Training starts!")
+        client_threads = [Thread(target=train_loop, args=(server, staleness_threshold, lambda: stop_flag)) for server in servers]
+        for thread in client_threads:
             thread.start()
-        # The original thread becomes evaluator
+
+        # The original thread becomes evaluator. Uses multiprocessing to eval at a constant rate
         start_time = datetime.now()
-        while all([thread.is_alive() for thread in threads]):
-            p = Process(target=evaluate, args=(model, eval_dataset_loader, start_time))
-            p.start()
-            p.join()
-            time.sleep(5)
+        with Pool(processes=eval_pool_size) as pool:
+            # While the last finished evaluation is less than training duration...
+            last_finished_eval = 0
+            while last_finished_eval < training_duration:
+                # Trim eval_results for efficiency
+                for i, x in dict(eval_results).items(): # TODO?
+                    if not x.ready():
+                        break
+                    del eval_results[i]
+                dur = datetime.now() - start_time
+                logger.debug(f"Evaluating model at {dur}")
+                eval_results[dur] = pool.apply_async(evaluate, (snapshot_model(), eval_dataset_loader, dur))
+                time.sleep(eval_interval)
+                last_finished_eval = next(i for i, x in eval_results.items() if not x.ready()).seconds
     except (KeyboardInterrupt, SystemExit):
-        logger.info("\nGracefully shutting client down...")
-        stop_flag = True
+        logger.debug("Gracefully shutting client down...")
     finally:
-        for thread in threads:
+        stop_flag = True
+        for thread in client_threads:
             thread.join()
-        p.terminate()
-        p.join()
+            
 
 def train_loop(server, staleness_threshold, should_stop):
     global epochs
     global last_smallest_epoch
 
-    for epoch in range(1000):
-        # Check staleness here
-        if epochs:
-            while(epoch - 1 - min(epochs.values()) > staleness_threshold):
-                if staleness_threshold != 0:
-                    print(f"{server.id} is at {epoch}, while min epoch is at {min(epochs.values())}")
-                if should_stop():
-                    break
-                time.sleep(1)
-
+    epoch = 0
+    while True:
         if should_stop():
             break
+
+        # Check staleness here
+        if epochs:
+            if epoch - 1 - min(epochs.values()) > staleness_threshold:
+                if staleness_threshold != 0:
+                    print(f"{server.id} is at {epoch}, while min epoch is at {min(epochs.values())}")
+                time.sleep(1)
+                continue
 
         loss = train(server)
         logger.debug(f"{server.id} {epoch} {loss}")
@@ -100,13 +108,15 @@ def train_loop(server, staleness_threshold, should_stop):
         smallest_epoch = min(epochs.values())
         last_smallest_epoch = smallest_epoch
 
+        epoch += 1
+
     server.close()
 
 def train(server):
-    global model
-    global lock
+    global model, lock
 
-    old_model = utils.add_model(utils.scale_model(Net(), 0), model) # clone model
+    # Clone model
+    old_model = snapshot_model()
 
     train_config = sy.TrainConfig(
         model=model,
@@ -119,7 +129,6 @@ def train(server):
         optimizer_args={"lr":0.1} 
     )
     train_config.send(server)
-
     loss = server.fit(dataset_key="mnist", return_ids=[0])
     new_model = train_config.get_model().obj
 
@@ -132,12 +141,17 @@ def train(server):
 
     return loss.data
 
-def evaluate(model, eval_dataset_loader, start_time):
-    dur = datetime.now() - start_time
-    
+def snapshot_model():
+    global model, lock
+    cloned_model = utils.scale_model(Net(), 0) # Empty model
+    with lock:
+        cloned_model = utils.add_model(cloned_model, model) 
+    return cloned_model
+
+def evaluate(snapshoted_model, eval_dataset_loader, dur):
     y_pred = []
     for data, _ in eval_dataset_loader:
-        y_pred.extend(model(data).detach().numpy().argmax(axis=1))
+        y_pred.extend(snapshoted_model(data).detach().numpy().argmax(axis=1))
     f1 = f1_score(eval_dataset.targets, y_pred, average='micro')
 
     logger.info(f"{dur}, {f1}")
