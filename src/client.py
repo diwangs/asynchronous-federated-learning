@@ -2,13 +2,16 @@ import sys
 import time
 import asyncio
 from threading import Thread, Lock
-from multiprocessing import Process, Pool
+from multiprocessing import Process, Pool, get_context
 from copy import deepcopy
 from datetime import datetime
 import logging
-logging.basicConfig()
 logger = logging.getLogger("client")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(level=logging.DEBUG)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(name)s - %(levelname)s - %(message)s'))
+console_handler.setLevel(logging.DEBUG)
+logger.addHandler(console_handler)
 
 import torch
 from torchvision import datasets, transforms
@@ -16,6 +19,7 @@ import syft as sy
 from syft.frameworks.torch.fl import utils
 from syft.workers.websocket_client import WebsocketClientWorker
 from sklearn.metrics import f1_score
+import yappi
 
 from base_model import Net, loss_fn
 
@@ -26,17 +30,7 @@ lock = Lock()
 epochs = {}
 last_smallest_epoch = 0
 
-eval_dataset = datasets.MNIST(
-    root="./data",
-    train=False,
-    download=True,
-    transform=transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-    ),
-)
-eval_dataset_loader = torch.utils.data.DataLoader(eval_dataset, batch_size=100, shuffle=False)
-
-def main(n_server, staleness_threshold, eval_interval=10, eval_pool_size=1, training_duration=300):
+def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, training_duration=1800, log_path=None, yappi_log_path=None):
     client_threads = []
     eval_results = {}
     stop_flag = False
@@ -55,62 +49,81 @@ def main(n_server, staleness_threshold, eval_interval=10, eval_pool_size=1, trai
                     continue
 
         logger.debug("Training starts!")
-        client_threads = [Thread(target=train_loop, args=(server, staleness_threshold, lambda: stop_flag)) for server in servers]
+        client_threads = [Thread(name=server.id, target=train_loop, args=(server, staleness_threshold, lambda: stop_flag)) for server in servers]
+        yappi.set_clock_type("wall")
+        yappi.start()
         for thread in client_threads:
             thread.start()
 
         # The original thread becomes evaluator. Uses multiprocessing to eval at a constant rate
         start_time = datetime.now()
-        with Pool(processes=eval_pool_size) as pool:
+        with get_context("spawn").Pool(processes=eval_pool_size, initializer=logger_file_initializer, initargs=(log_path,)) as pool:
             # While the last finished evaluation is less than training duration...
-            last_finished_eval = 0
-            while last_finished_eval < training_duration:
-                # Trim eval_results for efficiency
-                for i, x in dict(eval_results).items(): # TODO?
-                    if not x.ready():
-                        break
-                    del eval_results[i]
+            while True:
                 dur = datetime.now() - start_time
-                logger.debug(f"Evaluating model at {dur}")
-                eval_results[dur] = pool.apply_async(evaluate, (snapshot_model(), eval_dataset_loader, dur))
+                if dur.seconds > training_duration:
+                    logger.debug(f"No further evaluation needed")
+                    break
+                eval_results[dur] = pool.apply_async(evaluate, (snapshot_model(), dur))
+                logger.debug(f"Snapshoted model at {dur}, will evaluate soon...")
                 time.sleep(eval_interval)
-                last_finished_eval = next(i for i, x in eval_results.items() if not x.ready()).seconds
+
+                # Trim eval_results for efficiency
+                # for i, x in dict(eval_results).items(): # TODO?
+                #     if not x.ready():
+                #         break
+                #     del eval_results[i]
+            stop_flag = True
+            for result in eval_results.values():
+                result.wait()
     except (KeyboardInterrupt, SystemExit):
         logger.debug("Gracefully shutting client down...")
     finally:
         stop_flag = True
         for thread in client_threads:
             thread.join()
-            
+        yappi.stop()
+        logger.handlers = logger.handlers[:1]
+        logger_file_initializer(yappi_log_path)
+        logger.info("thread_name, train_loop_ttot, train_ttot, stale_ttot, train_loop_tavg, train_tavg, stale_tavg")
+        for thread in yappi.get_thread_stats():
+            func_stats = yappi.get_func_stats(ctx_id=thread.id, filter_callback=lambda x: yappi.func_matches(x, [train_loop, stale, train]))
+            if not func_stats or thread.name == "_MainThread":
+                continue
+            logger.info(format_func_stats(thread, func_stats))
 
 def train_loop(server, staleness_threshold, should_stop):
-    global epochs
-    global last_smallest_epoch
+    global epochs, last_smallest_epoch
 
     epoch = 0
+    now = datetime.now()
     while True:
         if should_stop():
             break
 
         # Check staleness here
         if epochs:
-            if epoch - 1 - min(epochs.values()) > staleness_threshold:
-                if staleness_threshold != 0:
-                    print(f"{server.id} is at {epoch}, while min epoch is at {min(epochs.values())}")
-                time.sleep(1)
-                continue
+            stale(epoch, staleness_threshold, should_stop)
 
+        # Train
         loss = train(server)
         logger.debug(f"{server.id} {epoch} {loss}")
 
         # Update global state
         epochs[server.id] = epoch
-        smallest_epoch = min(epochs.values())
-        last_smallest_epoch = smallest_epoch
+        last_smallest_epoch = min(epochs.values())
 
         epoch += 1
-
     server.close()
+
+# We express staleness in its own function to ease profiling
+def stale(epoch, staleness_threshold, should_stop):
+    while epoch - 1 - min(epochs.values()) > staleness_threshold:
+        if should_stop():
+            break
+        if staleness_threshold != 0:
+            logging.debug(f"{server.id} is at {epoch}, while min epoch is at {min(epochs.values())}")
+        time.sleep(1) # Not busy wait
 
 def train(server):
     global model, lock
@@ -148,7 +161,18 @@ def snapshot_model():
         cloned_model = utils.add_model(cloned_model, model) 
     return cloned_model
 
-def evaluate(snapshoted_model, eval_dataset_loader, dur):
+def evaluate(snapshoted_model, dur):
+    eval_dataset = datasets.MNIST(
+        root="./data",
+        train=False,
+        download=True,
+        transform=transforms.Compose(
+            [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+        ),
+    )
+    eval_dataset_loader = torch.utils.data.DataLoader(eval_dataset, batch_size=100, shuffle=False)
+
+    logger.debug(f"Evaluating the model snapshoted at {dur}...")
     y_pred = []
     for data, _ in eval_dataset_loader:
         y_pred.extend(snapshoted_model(data).detach().numpy().argmax(axis=1))
@@ -156,13 +180,32 @@ def evaluate(snapshoted_model, eval_dataset_loader, dur):
 
     logger.info(f"{dur}, {f1}")
 
+# Need a function to init file handler in main and evaluator processes, because filename is not a constant 
+def logger_file_initializer(path):
+    if not path:
+        return
+    file_handler = logging.FileHandler(path) # Log f1 evaluation to file for analysis later
+    file_handler.setFormatter(logging.Formatter('%(message)s'))
+    file_handler.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+
+def format_func_stats(thread_stat, func_stats):
+    # thread_name, train_loop_ttot, train_ttot, stale_ttot, train_loop_tavg, train_tavg, stale_tavg
+    train_loop_stat, train_stat, stale_stat = func_stats
+    return f"dataserver-{int(train_loop_stat.ctx_id) - 1}, {train_loop_stat[6]}, {train_stat[6]}, {stale_stat[6]}, {train_loop_stat[14]}, {train_stat[14]}, {stale_stat[14]}"
+
 if __name__ == "__main__":
     try:
         N_SERVER = int(sys.argv[1])
         STALENESS_THRESHOLD = int(sys.argv[2])
+        F1_LOG_PATH = sys.argv[3]
+        YAPPI_LOG_PATH = sys.argv[4]
         logger.debug(f"Will start client (model owner) that will connect to {N_SERVER} server(s)")
     except Exception as e:
         logger.error(e)
         sys.exit()
-    
-    main(N_SERVER, STALENESS_THRESHOLD)
+
+    logger_file_initializer(F1_LOG_PATH)
+    logger.info("time, f1")
+
+    main(N_SERVER, STALENESS_THRESHOLD, log_path=F1_LOG_PATH, yappi_log_path=YAPPI_LOG_PATH)

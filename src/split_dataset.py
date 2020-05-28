@@ -31,6 +31,7 @@ def split_dataset_indices(indices_per_class, n_server, stdev):
             remaining_samples -= raw_class_split
         class_splits.append(remaining_samples)
         shuffle(class_splits) # To reverse the serial effect (skewness on the first index, etc.)
+        print(f"class {i} will be split to each servers with this scheme {class_splits}")
         assert sum(class_splits) == class_count, "Bad split"
 
         # Sample indices from indices_per_class based on class_splits

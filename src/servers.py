@@ -2,7 +2,7 @@ import sys
 from syft.workers.websocket_server import WebsocketServerWorker
 import syft as sy
 from collections import Counter
-from multiprocessing import Process, Pool
+from multiprocessing import Process, Pool, get_context
 from time import sleep
 
 from torchvision import datasets, transforms
@@ -23,7 +23,7 @@ def main(n_server, stdev):
     indices_per_server = split_dataset_indices(indices_per_class, n_server, stdev)
 
     print("Starting servers...")
-    with Pool(processes=n_server) as pool:
+    with get_context("spawn").Pool(processes=n_server) as pool:
         pool.starmap(run_server, zip(range(n_server), indices_per_server))
 
 def run_server(i, indices):
