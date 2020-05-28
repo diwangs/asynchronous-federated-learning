@@ -11,13 +11,13 @@ cleanup()
     sudo tc qdisc del dev lo root
     echo "Forcefully shutting servers down..."
     # TODO: wait for servers to fork
-    kill $(echo $(pgrep -P $SERVERS_PID) | tr '\n' ' ')$SERVERS_PID
+    kill -9 $(echo $(pgrep -P $SERVERS_PID) | tr '\n' ' ')$SERVERS_PID
 }
 trap cleanup EXIT
 
 LOG_DIR="out/$STDEV-$LOSS-$STALENESS_THRESHOLD-$(date +%s)"
 mkdir -p $LOG_DIR
-python src/servers.py $N_SERVER $STDEV | tee "$LOG_DIR/server.log" &
+python src/servers.py $N_SERVER $STDEV &
 SERVERS_PID=$!
 echo "Modifying network..."
 sudo tc qdisc add dev lo root handle 1:0 netem loss random $LOSS
