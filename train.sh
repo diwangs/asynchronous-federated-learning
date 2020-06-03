@@ -21,4 +21,4 @@ python src/servers.py $N_SERVER $STDEV &
 SERVERS_PID=$!
 echo "Modifying network..."
 sudo tc qdisc add dev lo root handle 1:0 netem loss random $LOSS
-python src/client.py $N_SERVER $STALENESS_THRESHOLD "$LOG_DIR/f1.csv" "$LOG_DIR/yappi.csv"
+python src/client.py $N_SERVER $STALENESS_THRESHOLD "$LOG_DIR/f1_time.csv" "$LOG_DIR/f1_epoch.csv" "$LOG_DIR/yappi.csv"

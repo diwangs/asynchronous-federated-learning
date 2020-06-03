@@ -2,16 +2,21 @@ import sys
 import time
 import asyncio
 from threading import Thread, Lock
-from multiprocessing import Process, Pool, get_context
+from multiprocessing import Process, Pool, get_context, Queue
 from copy import deepcopy
 from datetime import datetime
 import logging
-logger = logging.getLogger("client")
-logger.setLevel(level=logging.DEBUG)
-console_handler = logging.StreamHandler()
+console_handler = logging.StreamHandler(stream=sys.stdout)
 console_handler.setFormatter(logging.Formatter('%(name)s - %(levelname)s - %(message)s'))
 console_handler.setLevel(logging.DEBUG)
+
+logger = logging.getLogger("client")
+logger.setLevel(level=logging.DEBUG)
 logger.addHandler(console_handler)
+
+logger_f1_epoch = logging.getLogger("client_f1_epoch")
+logger_f1_epoch.setLevel(level=logging.DEBUG)
+logger_f1_epoch.addHandler(console_handler)
 
 import torch
 from torchvision import datasets, transforms
@@ -28,9 +33,10 @@ model = torch.jit.trace(Net(), torch.zeros([1, 1, 28, 28], dtype=torch.float))
 lock = Lock()
 
 epochs = {}
-last_smallest_epoch = 0
+last_smallest_epoch = -1
+largest_stale = 0
 
-def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, training_duration=1800, log_path=None, yappi_log_path=None):
+def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, training_duration=60, log_path=None, yappi_log_path=None, f1_epoch_log_path=None):
     client_threads = []
     eval_results = {}
     stop_flag = False
@@ -49,7 +55,9 @@ def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, trai
                     continue
 
         logger.debug("Training starts!")
-        client_threads = [Thread(name=server.id, target=train_loop, args=(server, staleness_threshold, lambda: stop_flag)) for server in servers]
+        ctx = get_context("spawn")
+        evaluator_q = ctx.Queue()
+        client_threads = [Thread(name=server.id, target=train_loop, args=(server, staleness_threshold, evaluator_q, lambda: stop_flag)) for server in servers]
         yappi.set_clock_type("wall")
         yappi.start()
         for thread in client_threads:
@@ -57,25 +65,18 @@ def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, trai
 
         # The original thread becomes evaluator. Uses multiprocessing to eval at a constant rate
         start_time = datetime.now()
-        with get_context("spawn").Pool(processes=eval_pool_size, initializer=logger_file_initializer, initargs=(log_path,)) as pool:
-            # While the last finished evaluation is less than training duration...
-            while True:
-                dur = datetime.now() - start_time
-                if dur.seconds > training_duration:
-                    logger.debug(f"No further evaluation needed")
-                    break
-                eval_results[dur] = pool.apply_async(evaluate, (snapshot_model(), dur))
-                logger.debug(f"Snapshoted model at {dur}, will evaluate soon...")
-                time.sleep(eval_interval)
+        p = ctx.Process(target=evaluator, args=(evaluator_q, log_path, f1_epoch_log_path))
+        p.start()
 
-                # Trim eval_results for efficiency
-                # for i, x in dict(eval_results).items(): # TODO?
-                #     if not x.ready():
-                #         break
-                #     del eval_results[i]
-            stop_flag = True
-            for result in eval_results.values():
-                result.wait()
+        while True:
+            dur = datetime.now() - start_time
+            if dur.seconds > training_duration:
+                logger.debug(f"No further evaluation needed")
+                break
+            evaluator_q.put((snapshot_model(), dur))
+            logger.debug(f"Snapshoted model at {dur}, will evaluate soon...")
+            time.sleep(eval_interval)
+
     except (KeyboardInterrupt, SystemExit):
         logger.debug("Gracefully shutting client down...")
     finally:
@@ -85,14 +86,21 @@ def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, trai
         yappi.stop()
         logger.handlers = logger.handlers[:1]
         logger_file_initializer(yappi_log_path)
-        logger.info("thread_name, train_loop_ttot, train_ttot, stale_ttot, train_loop_tavg, train_tavg, stale_tavg")
+        logger.info("thread_name,train_loop_ttot,train_ttot,stale_ttot,train_loop_tavg,train_tavg,stale_tavg")
         for thread in yappi.get_thread_stats():
             func_stats = yappi.get_func_stats(ctx_id=thread.id, filter_callback=lambda x: yappi.func_matches(x, [train_loop, stale, train]))
             if not func_stats or thread.name == "_MainThread":
                 continue
             logger.info(format_func_stats(thread, func_stats))
+        logger.info(f"largest_stale: {largest_stale}")
+        try:
+            # Check if queue is empty
+            p.terminate()
+            p.join()
+        except NameError:
+            pass
 
-def train_loop(server, staleness_threshold, should_stop):
+def train_loop(server, staleness_threshold, evaluator_q, should_stop):
     global epochs, last_smallest_epoch
 
     epoch = 0
@@ -111,14 +119,22 @@ def train_loop(server, staleness_threshold, should_stop):
 
         # Update global state
         epochs[server.id] = epoch
-        last_smallest_epoch = min(epochs.values())
+        smallest_epoch = min(epochs.values())
+        if last_smallest_epoch != smallest_epoch:
+            logger.debug("Smallest epoch changed, evaluating epoch {epoch}...")
+            last_smallest_epoch = smallest_epoch
+            evaluator_q.put((snapshot_model(), smallest_epoch))
 
         epoch += 1
     server.close()
 
 # We express staleness in its own function to ease profiling
 def stale(epoch, staleness_threshold, should_stop):
-    while epoch - 1 - min(epochs.values()) > staleness_threshold:
+    global largest_stale
+    staleness = epoch - min(epochs.values())
+    if staleness > largest_stale:
+        largest_stale = staleness
+    while epoch - min(epochs.values()) > staleness_threshold + 1:
         if should_stop():
             break
         if staleness_threshold != 0:
@@ -161,7 +177,11 @@ def snapshot_model():
         cloned_model = utils.add_model(cloned_model, model) 
     return cloned_model
 
-def evaluate(snapshoted_model, dur):
+def evaluator(evaluator_q, log_path, f1_epoch_log_path):
+    # Reinitialize log
+    logger_file_initializer(log_path)
+    logger_f1_epoch_file_initializer(f1_epoch_log_path)
+
     eval_dataset = datasets.MNIST(
         root="./data",
         train=False,
@@ -172,13 +192,19 @@ def evaluate(snapshoted_model, dur):
     )
     eval_dataset_loader = torch.utils.data.DataLoader(eval_dataset, batch_size=100, shuffle=False)
 
-    logger.debug(f"Evaluating the model snapshoted at {dur}...")
-    y_pred = []
-    for data, _ in eval_dataset_loader:
-        y_pred.extend(snapshoted_model(data).detach().numpy().argmax(axis=1))
-    f1 = f1_score(eval_dataset.targets, y_pred, average='micro')
+    while True:
+        snapshoted_model, marker = evaluator_q.get()
+        logger.debug(f"Evaluating the model snapshoted at {marker}...")
 
-    logger.info(f"{dur}, {f1}")
+        y_pred = []
+        for data, _ in eval_dataset_loader:
+            y_pred.extend(snapshoted_model(data).detach().numpy().argmax(axis=1))
+        f1 = f1_score(eval_dataset.targets, y_pred, average='micro')
+
+        if type(marker) is int: # if it's epoch-wise evaluation
+            logger_f1_epoch.info(f"{marker},{f1}")
+        else: # if it's duration-wise evaluation
+            logger.info(f"{marker},{f1}")
 
 # Need a function to init file handler in main and evaluator processes, because filename is not a constant 
 def logger_file_initializer(path):
@@ -188,6 +214,14 @@ def logger_file_initializer(path):
     file_handler.setFormatter(logging.Formatter('%(message)s'))
     file_handler.setLevel(logging.INFO)
     logger.addHandler(file_handler)
+
+def logger_f1_epoch_file_initializer(path):
+    if not path:
+        return
+    file_handler = logging.FileHandler(path) # Log f1 evaluation to file for analysis later
+    file_handler.setFormatter(logging.Formatter('%(message)s'))
+    file_handler.setLevel(logging.INFO)
+    logger_f1_epoch.addHandler(file_handler)
 
 def format_func_stats(thread_stat, func_stats):
     # thread_name, train_loop_ttot, train_ttot, stale_ttot, train_loop_tavg, train_tavg, stale_tavg
@@ -199,13 +233,17 @@ if __name__ == "__main__":
         N_SERVER = int(sys.argv[1])
         STALENESS_THRESHOLD = int(sys.argv[2])
         F1_LOG_PATH = sys.argv[3]
-        YAPPI_LOG_PATH = sys.argv[4]
+        F1_EPOCH_LOG_PATH = sys.argv[4]
+        YAPPI_LOG_PATH = sys.argv[5]
         logger.debug(f"Will start client (model owner) that will connect to {N_SERVER} server(s)")
     except Exception as e:
         logger.error(e)
         sys.exit()
 
     logger_file_initializer(F1_LOG_PATH)
-    logger.info("time, f1")
+    logger.info("time,f1")
 
-    main(N_SERVER, STALENESS_THRESHOLD, log_path=F1_LOG_PATH, yappi_log_path=YAPPI_LOG_PATH)
+    logger_f1_epoch_file_initializer(F1_EPOCH_LOG_PATH)
+    logger_f1_epoch.info("epoch,f1")
+
+    main(N_SERVER, STALENESS_THRESHOLD, log_path=F1_LOG_PATH, yappi_log_path=YAPPI_LOG_PATH, f1_epoch_log_path=F1_EPOCH_LOG_PATH)
