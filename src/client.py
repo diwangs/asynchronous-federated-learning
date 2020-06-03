@@ -25,6 +25,8 @@ from syft.frameworks.torch.fl import utils
 from syft.workers.websocket_client import WebsocketClientWorker
 from sklearn.metrics import f1_score
 import yappi
+from socket import timeout
+from websocket._exceptions import WebSocketTimeoutException
 
 from base_model import Net, loss_fn
 
@@ -36,7 +38,7 @@ epochs = {}
 last_smallest_epoch = -1
 largest_stale = 0
 
-def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, training_duration=60, log_path=None, yappi_log_path=None, f1_epoch_log_path=None):
+def main(n_server, staleness_threshold, eval_interval=60, eval_pool_size=1, training_duration=600, log_path=None, yappi_log_path=None, f1_epoch_log_path=None):
     client_threads = []
     eval_results = {}
     stop_flag = False
@@ -51,7 +53,7 @@ def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, trai
                 try:
                     servers.append(WebsocketClientWorker(id=f"dataserver-{i}", port=8777+i, **kwargs_websocket))
                     break
-                except ConnectionRefusedError:
+                except (ConnectionRefusedError, timeout):
                     continue
 
         logger.debug("Training starts!")
@@ -114,14 +116,27 @@ def train_loop(server, staleness_threshold, evaluator_q, should_stop):
             stale(epoch, staleness_threshold, should_stop)
 
         # Train
-        loss = train(server)
+        try:
+            loss = train(server)
+        except WebSocketTimeoutException:
+            logger.debug(f"{server.id} timeout, reconnecting...")
+            while True:
+                if should_stop():
+                    break
+                try:
+                    server.close()
+                    server.connect()
+                    break
+                except timeout:
+                    continue
+            continue
         logger.debug(f"{server.id} {epoch} {loss}")
 
         # Update global state
         epochs[server.id] = epoch
         smallest_epoch = min(epochs.values())
         if last_smallest_epoch != smallest_epoch:
-            logger.debug("Smallest epoch changed, evaluating epoch {epoch}...")
+            logger.debug(f"Smallest epoch changed, evaluating epoch {epoch}...")
             last_smallest_epoch = smallest_epoch
             evaluator_q.put((snapshot_model(), smallest_epoch))
 
