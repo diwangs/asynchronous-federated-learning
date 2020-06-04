@@ -3,14 +3,14 @@
 N_SERVER=4
 
 mkdir -p logs
-for i in 1; do # Redo 3 times
-	for STDEV in 1000; do # 0, 10, 1000
-		for LOSS in 20%; do # 0%, 20%?
-			for STALENESS_THRESHOLD in 9999; do
+for i in {1..3}; do # Redo 3 times
+	for LOSS in 0% 10% 20%; do
+		for STDEV in 0 10 1000; do
+			for STALENESS_THRESHOLD in 0 6 12 9999; do
 				echo ""
-				echo " ---- STARTING $STDEV $LOSS $STALENESS_THRESHOLD $i ---- "
+				echo " ---- STARTING $LOSS $STDEV $STALENESS_THRESHOLD $i ---- "
 				echo ""
-				./train.sh $N_SERVER $STDEV $LOSS $STALENESS_THRESHOLD 2>&1 | tee logs/$STDEV-$LOSS-$STALENESS_THRESHOLD-$i.log
+				./train.sh $N_SERVER $LOSS $STDEV $STALENESS_THRESHOLD 2>&1 | tee logs/$LOSS-$STDEV-$STALENESS_THRESHOLD-$i.log
 			done
 		done
 	done

@@ -35,10 +35,12 @@ model = torch.jit.trace(Net(), torch.zeros([1, 1, 28, 28], dtype=torch.float))
 lock = Lock()
 
 epochs = {}
-last_smallest_epoch = -1
+last_smallest_epoch = 0
 largest_stale = 0
 
-def main(n_server, staleness_threshold, eval_interval=60, eval_pool_size=1, training_duration=600, log_path=None, yappi_log_path=None, f1_epoch_log_path=None):
+def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, training_duration=3600, log_path=None, yappi_log_path=None, f1_epoch_log_path=None):
+    global epochs
+
     client_threads = []
     eval_results = {}
     stop_flag = False
@@ -51,7 +53,9 @@ def main(n_server, staleness_threshold, eval_interval=60, eval_pool_size=1, trai
         for i in range(n_server):
             while True:
                 try:
-                    servers.append(WebsocketClientWorker(id=f"dataserver-{i}", port=8777+i, **kwargs_websocket))
+                    server = WebsocketClientWorker(id=f"dataserver-{i}", port=8777+i, **kwargs_websocket)
+                    servers.append(server)
+                    epochs[server.id] = 0
                     break
                 except (ConnectionRefusedError, timeout):
                     continue
@@ -96,7 +100,8 @@ def main(n_server, staleness_threshold, eval_interval=60, eval_pool_size=1, trai
             logger.info(format_func_stats(thread, func_stats))
         logger.info(f"largest_stale: {largest_stale}")
         try:
-            # Check if queue is empty
+            while not q.empty():
+                time.sleep(1)
             p.terminate()
             p.join()
         except NameError:
@@ -105,15 +110,14 @@ def main(n_server, staleness_threshold, eval_interval=60, eval_pool_size=1, trai
 def train_loop(server, staleness_threshold, evaluator_q, should_stop):
     global epochs, last_smallest_epoch
 
-    epoch = 0
+    epoch = 1
     now = datetime.now()
     while True:
         if should_stop():
             break
 
         # Check staleness here
-        if epochs:
-            stale(epoch, staleness_threshold, should_stop)
+        stale(epoch, staleness_threshold, should_stop)
 
         # Train
         try:

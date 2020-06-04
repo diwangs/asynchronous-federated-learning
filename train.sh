@@ -1,8 +1,8 @@
 #!/bin/sh
 
 N_SERVER=$1
-STDEV=$2
-LOSS=$3
+LOSS=$2
+STDEV=$3
 STALENESS_THRESHOLD=$4
 
 cleanup()
@@ -15,7 +15,7 @@ cleanup()
 }
 trap cleanup EXIT
 
-LOG_DIR="out/$STDEV-$LOSS-$STALENESS_THRESHOLD-$(date +%s)"
+LOG_DIR="out/$LOSS-$STDEV-$STALENESS_THRESHOLD-$(date +%s)"
 mkdir -p $LOG_DIR
 python src/servers.py $N_SERVER $STDEV &
 SERVERS_PID=$!
