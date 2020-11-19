@@ -63,7 +63,7 @@ def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, trai
         logger.debug("Training starts!")
         ctx = get_context("spawn")
         evaluator_q = ctx.Queue()
-        client_threads = [Thread(name=server.id, target=train_loop, args=(server, staleness_threshold, evaluator_q, lambda: stop_flag)) for server in servers]
+        client_threads = [Thread(name=server.id, target=train_loop, args=(server, staleness_threshold, n_server, evaluator_q, lambda: stop_flag)) for server in servers]
         yappi.set_clock_type("wall")
         yappi.start()
         for thread in client_threads:
@@ -89,6 +89,7 @@ def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, trai
         stop_flag = True
         for thread in client_threads:
             thread.join()
+
         yappi.stop()
         logger.handlers = logger.handlers[:1]
         logger_file_initializer(yappi_log_path)
@@ -99,15 +100,16 @@ def main(n_server, staleness_threshold, eval_interval=15, eval_pool_size=1, trai
                 continue
             logger.info(format_func_stats(thread, func_stats))
         logger.info(f"largest_stale: {largest_stale}")
+        
         try:
-            while not q.empty():
+            while not evaluator_q.empty():
                 time.sleep(1)
             p.terminate()
             p.join()
         except NameError:
             pass
 
-def train_loop(server, staleness_threshold, evaluator_q, should_stop):
+def train_loop(server, staleness_threshold, n_server, evaluator_q, should_stop):
     global epochs, last_smallest_epoch
 
     epoch = 1
@@ -117,12 +119,12 @@ def train_loop(server, staleness_threshold, evaluator_q, should_stop):
             break
 
         # Check staleness here
-        stale(epoch, staleness_threshold, should_stop)
+        stale(server, epoch, staleness_threshold, should_stop)
 
         # Train
         try:
-            loss = train(server)
-        except WebSocketTimeoutException:
+            loss = train(server, n_server)
+        except (WebSocketTimeoutException, TimeoutError):
             logger.debug(f"{server.id} timeout, reconnecting...")
             while True:
                 if should_stop():
@@ -148,7 +150,7 @@ def train_loop(server, staleness_threshold, evaluator_q, should_stop):
     server.close()
 
 # We express staleness in its own function to ease profiling
-def stale(epoch, staleness_threshold, should_stop):
+def stale(server, epoch, staleness_threshold, should_stop):
     global largest_stale
     staleness = epoch - min(epochs.values())
     if staleness > largest_stale:
@@ -160,7 +162,7 @@ def stale(epoch, staleness_threshold, should_stop):
             logging.debug(f"{server.id} is at {epoch}, while min epoch is at {min(epochs.values())}")
         time.sleep(1) # Not busy wait
 
-def train(server):
+def train(server, n_server):
     global model, lock
 
     # Clone model
@@ -181,7 +183,7 @@ def train(server):
     new_model = train_config.get_model().obj
 
     # Asynchronous federated averaging: model += 1/n * (new_model - old_model), the stateful way
-    weight = 1
+    weight = 1/n_server
     grad = utils.add_model(new_model, utils.scale_model(old_model, -1))
     scaled_grad = utils.scale_model(grad, weight)
     with lock:

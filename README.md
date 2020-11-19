@@ -1,48 +1,25 @@
-TODO:
-* Parameterize data server with real data
-* Sanitize logs
-* Profiling
+# Async FL using PySyft
+My bachelor thesis project, to fulfill a degree requirement from Institut Teknologi Bandung
 
-# Distributed Model Consistency Spectrum
-* Synchronous
-  * Models are combined at training time, 
-* Stale-synchronous
-* Asynchronous
-* Model averaging
-  * Models are combined post-training
-* Ensemble
-  * Models are never combined
+by Senapati Sang Diwangkara, 13516107
 
-# What to test
-General theme: performance (convergence time) gain, so graph the accuracy vs time and epoch, and number of node waiting
-* Benchmark: 
-  * Centralized
-  * Distributed (no loss and delay, evenly distributed, small number of node?)
-    * 2, 5, 10, 15 nodes
-* Staleness testing: 
-  * Constant number of node? -> 10? -> mau diganti
-  * Constant and uniform loss and delay (+ jitter and additional processing time?)
-  * Variable standard deviation
-  * Variable staleness threshold
+This work examines the effect of asynchronicity in aggregation algorithm (i.e. when the nodes' training round / epoch don't have to be in sync with one another). 
+In particular, I'm interested in the effect of data imbalance. 
+Intuitively speaking, if we have some true/false dataset that is split between 2 nodes, but each node only have either true or false data, and one node is faster than the other, than the trained model should perform worse than if the model is trained centrally, right?
+So here, we tried to verify that intuition quntitatively.
 
-* Things to improve: if some particular nodes are constantly slow, they bog everyone else
-  * Test with different delay on some particular node?
-* Asynchronous averaging weighting?
+## Experiment Architecture
+![Arch](arch.png)
 
-Question: 
-* Node count constant aja? -> bisa jadi pengaruh
-* Loss and delay uniform? Atau dibedain per particular node? Dan berdasarkan apa? How to formalize which node get how much delay?
-  * Node banyak delay banyak - Node banyak delay dikit. For 0-std: random
-  * Gausah...
+Clients are implemented in `src/client.py`. 
+It will spool up some client threads to connect to each server, and an evaluator process to evaluate the latest model periodically. 
+Each client threads will communicate with the evaluator process with the `evaluator_q` variable, that acts as a queue. 
+The threads will enqueue their evaluation order and they will be consumed by the evaluator process, which then will evaluate the snapshoted model and print the result.
 
-Hypothesis: 
-* Asynchronicity helps performance with the right level in the right condition
-* This condition is partly determined by the "wildness" of the environment: 
-  * non-IID-ness, unevenness of the data
-  * Network quality of the servers
-* Applying high asynchronicity in a certain wild env can result in model being inaccurate: slow but knowledgable server will lose the gradient "tug-of-war"
-* Applying low asynchronicity in some other wild env can result in slowness: slow and low-information server can be left behind
-* In a tame environment, there's a performance plateau anyway due to amdahl's law? just like regular distributed learning
+Servers are implemented in `src/servers.py`. 
+It will split a given dataset (using `src/split_dataset.py`) and started the servers that will host said data.
 
-# BUG!
-* async_fit + lossy network is not good, because the synchronous handle can get onesided disconnected
+To measure optimization performance, we use `yappi` as a profiler to measure how much time each function is spending.
+
+## Questions?
+Poke me at twitter.com/diwangs__ 
