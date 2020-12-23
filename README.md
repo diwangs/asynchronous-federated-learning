@@ -3,7 +3,7 @@ My bachelor thesis project, to fulfill a degree requirement from Bandung Institu
 
 by Senapati Sang Diwangkara, 13516107
 
-This [paper](paper.pdf) was published on [ICITSI 2020](http://icitsi.org/land_page/schedule#group)
+This [paper](paper.pdf) was published on [ICITSI 2020](https://ieeexplore.ieee.org/document/9264958)
 
 This work examines the effect of asynchronicity in aggregation algorithm (i.e. when the nodes' training round / epoch don't have to be in sync with one another). 
 In particular, I'm interested in the effect of data imbalance. 
