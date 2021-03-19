@@ -18,7 +18,7 @@ mkl-service==2.3.0
 msgpack==1.0.0
 numpy==1.18.1
 phe==1.4.0
-Pillow==6.2.2
+Pillow==8.1.1
 protobuf==3.11.3
 pyparsing==2.4.6
 python-dateutil==2.8.1
