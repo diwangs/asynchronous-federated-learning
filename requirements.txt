@@ -7,7 +7,7 @@ Flask-SocketIO==4.2.1
 idna==2.8
 itsdangerous==1.1.0
 Jinja2==2.11.1
-joblib==0.14.1
+joblib==1.2.0
 kiwisolver==1.0.1
 lz4==3.0.2
 MarkupSafe==1.1.1
