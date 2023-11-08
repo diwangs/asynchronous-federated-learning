@@ -19,7 +19,7 @@ msgpack==1.0.0
 numpy==1.18.1
 phe==1.4.0
 Pillow==6.2.2
-protobuf==3.11.3
+protobuf==3.18.3
 pyparsing==2.4.6
 python-dateutil==2.8.1
 python-engineio==3.11.2
